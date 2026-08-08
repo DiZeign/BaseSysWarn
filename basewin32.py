@@ -1,8 +1,12 @@
+import io
+import math
 import os
 import random
+import struct
 import sys
 import threading
 import time
+import wave
 
 try:
     import winsound
@@ -38,6 +42,14 @@ ADMIN_TYPING_INTERVAL = 0.080
 SERVER_PROMPT_HOLD = 4.0
 PATH_PROMPT_HOLD = 2.0
 REALTIME_READ_HOLD = 1.0
+
+# Очень тихий звуковой слой. 0.018 ~= 1.8% от полной PCM-амплитуды.
+SFX_ENABLED = True
+SFX_VOLUME = 0.018
+SFX_EVENT_CHANCE = 0.20
+SFX_LORE_CHANCE = 0.32
+SFX_EXTRA_CHANCE = 0.18
+SFX_SAMPLE_RATE = 8000
 
 CHAIN_CHANCE = 0.035
 GLITCH_CHANCE = 0.025
@@ -480,13 +492,53 @@ def typing_print(text, speed=SPEED_TYPING):
     print()
 
 
-def safe_beep(frequency, duration):
+def _build_quiet_tone(frequency, duration, volume=SFX_VOLUME):
+    sample_count = max(1, int(SFX_SAMPLE_RATE * duration / 1000.0))
+    amplitude = int(32767 * max(0.0, min(1.0, volume)))
+    fade_samples = max(1, min(sample_count // 2, int(SFX_SAMPLE_RATE * 0.004)))
+    frames = bytearray()
+
+    for index in range(sample_count):
+        envelope = 1.0
+        if index < fade_samples:
+            envelope = index / fade_samples
+        elif index >= sample_count - fade_samples:
+            envelope = (sample_count - index - 1) / fade_samples
+
+        sample = int(
+            amplitude
+            * max(0.0, envelope)
+            * math.sin(2.0 * math.pi * frequency * index / SFX_SAMPLE_RATE)
+        )
+        frames.extend(struct.pack("<h", sample))
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(SFX_SAMPLE_RATE)
+        wav.writeframes(frames)
+    return buffer.getvalue()
+
+
+def safe_beep(frequency, duration, volume=SFX_VOLUME):
     if winsound is None:
         return
     try:
-        winsound.Beep(frequency, duration)
-    except RuntimeError:
+        tone = _build_quiet_tone(frequency, duration, volume)
+        winsound.PlaySound(tone, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
+    except (RuntimeError, TypeError, ValueError):
         pass
+
+
+def maybe_event_sound(chance=SFX_EVENT_CHANCE):
+    if not SFX_ENABLED or winsound is None or random.random() >= chance:
+        return
+
+    safe_beep(
+        random.choice([360, 420, 480, 540, 620, 700, 780, 860]),
+        random.randint(14, 30),
+    )
 
 
 def generate_mac():
@@ -610,8 +662,7 @@ def animate_packet(direction, packet_name, packet_size, target_seconds, color):
 
 
 def run_console_access_intro():
-    print("DB_TOTAL_CMD - TS.SYS [ data3.%-9.1.04.11.4 ]")
-    print("total.corporation (TOTAL CORPORATION).")
+    print("DB_TOTAL_CMD - TS.SYS [ data3.%-9.1.04.11.4 ] total.corporation (TOTAL CORPORATION).")
     print()
     sys.stdout.write("[r.ADMIN%anonym.user]: ")
     sys.stdout.flush()
@@ -655,7 +706,7 @@ def run_console_access_intro():
     )
     print()
 
-    print("srv%DIZEIGNS_DB:anonym.user ## CONSOLE OPENED SUCCESSFUL")
+    print("[srv%DIZEIGNS_DB:anonym.user] :")
     time.sleep(SERVER_PROMPT_HOLD)
 
     sys.stdout.write("[srv%DIZEIGNS_DB] : ")
@@ -1017,6 +1068,7 @@ def emit_extra_event(event):
     else:
         raise RuntimeError(f"Unknown extra event family: {family}")
 
+    maybe_event_sound(SFX_EXTRA_CHANCE)
     print(f"{colors[family]}{tag} {detail}{RESET}")
     flow_sleep(SPEED_EVENT_PAUSE * random.uniform(0.20, 0.65))
 
@@ -1099,6 +1151,7 @@ def emit_lore_event(event):
     else:
         raise RuntimeError(f"Unknown lore event: {event}")
 
+    maybe_event_sound(SFX_LORE_CHANCE)
     print(line)
     flow_sleep(SPEED_EVENT_PAUSE * random.uniform(0.30, 0.80))
 
@@ -1106,6 +1159,10 @@ def emit_lore_event(event):
 def emit_event(event):
     address = random_address()
     pid = random.randint(100, 12000)
+
+    # LORE/EXTRA сами вызывают свой тихий SFX, чтобы не получать двойной сигнал.
+    if event not in LORE_EVENTS and event not in EXTRA_EVENT_TO_FAMILY:
+        maybe_event_sound()
 
     if event == "hex_block":
         for _ in range(random.randint(2, 6)):
